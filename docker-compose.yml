@@ -1,7 +1,7 @@
 version: '3.3'
 networks:
-  proxy_proxy:
-    external: true
+  proxy:
+    driver: bridge
 services:
   mongo:
     ## Mongo database for both kadira-engine and kadira-ui
@@ -10,7 +10,7 @@ services:
       - "/data/db"
     command: mongod --smallfiles --replSet kadira
     networks:
-      - proxy_proxy
+      - proxy
     restart: always
     labels:
       - "traefik.enable=false"
@@ -23,8 +23,9 @@ services:
       - MONGO_URL=mongodb://mongo/kadira?replicaSet=kadira
       - MONGO_SHARD_URL_one=mongodb://mongo/kadira?replicaSet=kadira
     networks:
-      - proxy_proxy
+      - proxy
     depends_on:
+      - proxy
       - mongo
     restart: always
     labels:
@@ -40,10 +41,12 @@ services:
     environment:
       - MONGO_URL=mongodb://mongo/kadira
     depends_on:
+      - proxy
       - mongo
     networks:
       - proxy_proxy
     restart: always
+    
 
   kadira-ui:
     ## Meteor app that presents the Kadira user interface.
@@ -55,10 +58,11 @@ services:
       - MONGO_URL=mongodb://mongo/kadira
       - MONGO_SHARD_URL_one=mongodb://mongo/kadira
     depends_on:
+      - proxy
       - mongo
     restart: always
     networks:
-      - proxy_proxy
+      - proxy
     labels:
       - "traefik.http.routers.kadira_ui.rule=Host(`${UI_HOST}`)"
       - "traefik.http.routers.kadira_ui.entrypoints=websecure"
@@ -66,13 +70,40 @@ services:
       - "traefik.http.routers.kadira_ui.tls.certresolver=leresolver"
       - "traefik.http.services.kadira_ui.loadbalancer.server.port=4000"
   
-  traefik:
-    image: traefik:latest
-    restart: unless-stopped
-    command: traefik --docker --acme=true --acme.domains='${UI_HOST},${ENGINE_HOST}' --acme.email='${EMAIL}' --acme.httpChallenge.entryPoint=http --acme.entrypoint=https --acme.storage=acme.json --defaultentrypoints=http,https --defaultentrypoints=https --entryPoints='Name:http Address::80 Redirect.EntryPoint:https' --entryPoints='Name:https Address::443 TLS'
+  proxy:
+    image: "traefik:v2.0.0"
+    container_name: proxy
+    networks:
+      - proxy
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --providers.docker
+      - --api
+      #- --certificatesresolvers.leresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.leresolver.acme.email=${EMAIL}
+      - --certificatesresolvers.leresolver.acme.storage=/acme.json
+      - --certificatesresolvers.leresolver.acme.tlschallenge=true
     ports:
-      - 80:80
-      - 443:443
+      - "80:80"
+      - "443:443"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./acme.json:/acme.json"
+    labels:
+      # Dashboard
+      - "traefik.http.routers.traefik.rule=Host(`${DASHBOARD_HOST}`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.tls.certresolver=leresolver"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.middlewares=authtraefik"
+      - "traefik.http.middlewares.authtraefik.basicauth.users=${DASHBOARD_AUTH}" # user/password
+      
+      # global redirect to https
+      - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
 
+      # middleware redirect
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+  
